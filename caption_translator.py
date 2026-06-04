@@ -228,49 +228,81 @@ class OverlayWindow:
 class TranscriptLogger:
     """
     هر بار که Live Captions باز می‌شود یک فایل جدید در پوشه data می‌سازد.
-    هر چیزی که Live Captions نمایش می‌دهد را با timestamp ذخیره می‌کند.
-    با بسته شدن Live Captions، فایل بسته می‌شود.
+    فقط خطوط کامل‌شده را ذخیره می‌کند — نه هر تغییر کلمه‌ای.
+    منطق: خط آخر هنوز در حال تایپ است؛ وقتی خط جدیدی آمد،
+    خط قبلی کامل شده و ذخیره می‌شود.
     """
     DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 
+    # پیام‌های سیستمی که نباید ذخیره شوند
+    SKIP_PREFIXES = ('Ready to show live captions', 'Live Captions is')
+
     def __init__(self):
         os.makedirs(self.DATA_DIR, exist_ok=True)
-        self._file       = None
-        self._path       = None
-        self._last_saved = ''
-        self._open_time  = None
+        self._file         = None
+        self._path         = None
+        self._open_time    = None
+        self._logged       = set()   # خطوطی که قبلاً ذخیره شدند
+        self._pending_last = ''      # آخرین خط که هنوز ممکن است ادامه داشته باشد
+
+    def _is_system_msg(self, line: str) -> bool:
+        return any(line.startswith(p) for p in self.SKIP_PREFIXES)
 
     def on_open(self):
-        """وقتی Live Captions باز شد — فایل جدید بساز"""
         if self._file:
-            return  # قبلاً باز شده
-        self._open_time = datetime.now()
+            return
+        self._open_time    = datetime.now()
+        self._logged       = set()
+        self._pending_last = ''
         fname = self._open_time.strftime('%Y-%m-%d_%H-%M-%S') + '.txt'
         self._path = os.path.join(self.DATA_DIR, fname)
         self._file = open(self._path, 'w', encoding='utf-8')
-        self._file.write(f'Live Captions - {self._open_time.strftime("%Y/%m/%d  %H:%M:%S")}\n')
+        self._file.write(f'Live Captions  {self._open_time.strftime("%Y/%m/%d  %H:%M:%S")}\n')
         self._file.write('=' * 60 + '\n\n')
         self._file.flush()
         print(f'[LOG] {self._path}')
 
     def on_close(self):
-        """وقتی Live Captions بسته شد — فایل را ببند"""
         if not self._file:
             return
-        self._file.write(f'\n\n--- پایان  {datetime.now().strftime("%H:%M:%S")} ---\n')
+        # آخرین خط pending را هم ذخیره کن
+        self._save_line(self._pending_last)
+        self._file.write(f'\n--- end  {datetime.now().strftime("%H:%M:%S")} ---\n')
         self._file.close()
-        self._file      = None
-        self._last_saved = ''
-        print(f'[LOG] closed: {self._path}')
+        self._file         = None
+        self._logged       = set()
+        self._pending_last = ''
+        print(f'[LOG] saved: {self._path}')
+
+    def _save_line(self, line: str):
+        """یک خط را ذخیره کن (اگر جدید و معتبر باشد)"""
+        line = line.strip()
+        if not line or line in self._logged or self._is_system_msg(line):
+            return
+        self._logged.add(line)
+        ts = datetime.now().strftime('%H:%M:%S')
+        self._file.write(f'[{ts}]  {line}\n')
+        self._file.flush()
 
     def append(self, text: str):
-        """متن جدید را اضافه کن (فقط اگر تغییر کرده)"""
-        if not self._file or text == self._last_saved:
+        """
+        متن فعلی Live Captions را پردازش کن.
+        همه خطوط به‌جز آخری کامل‌اند — آن‌ها را ذخیره کن.
+        خط آخر هنوز در حال رشد است — منتظر بمان.
+        """
+        if not self._file:
             return
-        self._last_saved = text
-        ts = datetime.now().strftime('%H:%M:%S')
-        self._file.write(f'[{ts}]  {text}\n')
-        self._file.flush()
+
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if not lines:
+            return
+
+        # همه خطوط به‌جز آخری را ذخیره کن
+        for line in lines[:-1]:
+            self._save_line(line)
+
+        # خط آخر را به عنوان pending نگه دار
+        self._pending_last = lines[-1]
 
 
 # ─── برنامه اصلی ────────────────────────────────────────────
