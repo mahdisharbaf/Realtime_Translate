@@ -30,11 +30,23 @@ class UIACaptionReader:
     """
     متن را مستقیماً از accessibility tree ویندوز می‌خواند.
     سرعت: ~5-15ms  (در برابر ~300-500ms برای OCR)
+    پیدا کردن پنجره از طریق نام پروسه — مستقل از زبان ویندوز.
     """
+    # عناوین Live Captions در زبان‌های مختلف (fallback)
+    TITLES = {
+        'live captions',       # English
+        'liveuntertitel',      # German
+        'sous-titres en direct', # French
+        'subtítulos en directo', # Spanish
+        'ondertiteling',       # Dutch
+        'didascalie dal vivo', # Italian
+    }
+
     def __init__(self):
         self._ready = False
         self._win   = None
         self._last_search = 0.0
+        self._lc_pid = None
         self._init_uia()
 
     def _init_uia(self):
@@ -45,17 +57,90 @@ class UIACaptionReader:
         except ImportError:
             self._ready = False
 
+    def _find_lc_hwnd(self):
+        """پیدا کردن hwnd پنجره Live Captions — زبان‌مستقل"""
+        our_pid = os.getpid()
+
+        # روش ۱: از طریق نام پروسه LiveCaptions.exe (مطمئن‌ترین روش)
+        try:
+            import psutil, win32process
+            lc_pids = {p.pid for p in psutil.process_iter(['pid', 'name'])
+                       if p.info['name'] and 'livecaptions' in p.info['name'].lower()}
+            if lc_pids:
+                found = []
+                def cb1(hwnd, _):
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        if pid in lc_pids:
+                            found.append(hwnd)
+                    except Exception:
+                        pass
+                win32gui.EnumWindows(cb1, None)
+                if found:
+                    best = max(found, key=lambda h: (
+                        lambda r: (r[2]-r[0])*(r[3]-r[1]))(win32gui.GetWindowRect(h)))
+                    return best
+        except Exception:
+            pass
+
+        # روش ۲: جستجو با عنوان در همه زبان‌ها + کلاس پنجره
+        try:
+            import win32process
+            result = []
+            def cb2(hwnd, _):
+                if not win32gui.IsWindowVisible(hwnd) or result:
+                    return
+                try:
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if pid == our_pid:
+                        return
+                except Exception:
+                    pass
+                title = win32gui.GetWindowText(hwnd).lower().strip()
+                cls   = win32gui.GetClassName(hwnd)
+                if title in self.TITLES or cls == 'LiveCaptionsDesktopWindow':
+                    result.append(hwnd)
+            win32gui.EnumWindows(cb2, None)
+            if result:
+                return result[0]
+        except Exception:
+            pass
+
+        return None
+
     def _find_win(self):
+        """پیدا کردن UIA Window از hwnd"""
         now = time.monotonic()
-        if now - self._last_search < 2.5 and self._win is not None:
+        if now - self._last_search < 2.0 and self._win is not None:
             return self._win
         self._last_search = now
+        self._win = None
+
+        hwnd = self._find_lc_hwnd()
+        if hwnd:
+            try:
+                # تبدیل hwnd به UIA control
+                ctrl = self._auto.ControlFromHandle(hwnd)
+                if ctrl:
+                    self._win = ctrl
+                    return self._win
+            except Exception:
+                pass
+
+        # fallback: جستجوی UIA با عنوان
         try:
-            w = self._auto.WindowControl(searchDepth=1, Name='Live Captions')
-            self._win = w if w.Exists(0.05) else None
+            for title in ('Live Captions', 'Liveuntertitel',
+                          'Sous-titres en direct', 'Subtítulos en directo'):
+                w = self._auto.WindowControl(searchDepth=1, Name=title)
+                if w.Exists(0.02):
+                    self._win = w
+                    return self._win
         except Exception:
-            self._win = None
-        return self._win
+            pass
+
+        return None
 
     # کلمات/پیشوندهایی که نشانه‌ی نام کنترل UI هستند نه متن واقعی
     _JUNK = {'Live Captions', 'DesktopWindowXamlSource', 'LiveCaptions'}

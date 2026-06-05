@@ -22,7 +22,7 @@ python -m pip install --upgrade pip -q
 
 echo.
 echo [2/3] Installing Python packages...
-pip install mss Pillow numpy pytesseract deep-translator pywin32 arabic-reshaper python-bidi uiautomation
+pip install mss Pillow numpy pytesseract deep-translator pywin32 arabic-reshaper python-bidi uiautomation psutil
 
 python -m pywin32_postinstall -install > nul 2>&1
 
